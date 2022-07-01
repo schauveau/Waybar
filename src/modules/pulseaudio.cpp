@@ -1,5 +1,27 @@
 #include "modules/pulseaudio.hpp"
 
+// Hold a lock on a Pulseaudio mainloop thread for the object lifetime.
+struct PaThreadLocker {
+  pa_threaded_mainloop * mainloop_ ;
+  PaThreadLocker(pa_threaded_mainloop * mainloop) : mainloop_(mainloop)
+  {
+    pa_threaded_mainloop_lock(mainloop_);
+  } 
+  ~PaThreadLocker() {
+    if (mainloop_) {
+      pa_threaded_mainloop_unlock(mainloop_);
+    }
+    mainloop_ = nullptr;
+  }
+  // Early release of the lock.
+  void unlock() {
+    if (mainloop_) {
+      pa_threaded_mainloop_unlock(mainloop_);
+    }
+    mainloop_ = nullptr;
+  }
+};
+
 waybar::modules::Pulseaudio::Pulseaudio(const std::string &id, const Json::Value &config)
     : ALabel(config, "pulseaudio", id, "{volume}%"),
       mainloop_(nullptr),
@@ -15,7 +37,7 @@ waybar::modules::Pulseaudio::Pulseaudio(const std::string &id, const Json::Value
   if (mainloop_ == nullptr) {
     throw std::runtime_error("pa_mainloop_new() failed.");
   }
-  pa_threaded_mainloop_lock(mainloop_);
+  PaThreadLocker locker(mainloop_);
   mainloop_api_ = pa_threaded_mainloop_get_api(mainloop_);
   context_ = pa_context_new(mainloop_api_, "waybar");
   if (context_ == nullptr) {
@@ -30,7 +52,6 @@ waybar::modules::Pulseaudio::Pulseaudio(const std::string &id, const Json::Value
   if (pa_threaded_mainloop_start(mainloop_) < 0) {
     throw std::runtime_error("pa_mainloop_run() failed.");
   }
-  pa_threaded_mainloop_unlock(mainloop_);
   event_box_.add_events(Gdk::SCROLL_MASK | Gdk::SMOOTH_SCROLL_MASK);
   event_box_.signal_scroll_event().connect(sigc::mem_fun(*this, &Pulseaudio::handleScroll));
 }
@@ -87,6 +108,7 @@ bool waybar::modules::Pulseaudio::handleScroll(GdkEventScroll *e) {
       dir = SCROLL_DIR::UP;
     }
   }
+  PaThreadLocker locker(mainloop_);
   double volume_tick = static_cast<double>(PA_VOLUME_NORM) / 100;
   pa_volume_t change = volume_tick;
   pa_cvolume pa_volume = pa_volume_;
@@ -103,7 +125,7 @@ bool waybar::modules::Pulseaudio::handleScroll(GdkEventScroll *e) {
       pa_cvolume_dec(&pa_volume, change);
     }
   }
-  pa_context_set_sink_volume_by_index(context_, sink_idx_, &pa_volume, volumeModifyCb, this);
+  pa_context_set_sink_volume_by_index(context_, sink_idx_, &pa_volume, volumeModifyCb, this);  
   return true;
 }
 
@@ -231,6 +253,7 @@ const std::vector<std::string> waybar::modules::Pulseaudio::getPulseIcon() const
 auto waybar::modules::Pulseaudio::update() -> void {
   auto format = format_;
   std::string tooltip_format;
+  PaThreadLocker locker(mainloop_);
   if (!alt_) {
     std::string format_name = "format";
     if (monitor_.find("a2dp_sink") != std::string::npos ||  // PulseAudio
@@ -288,7 +311,7 @@ auto waybar::modules::Pulseaudio::update() -> void {
       label_.set_tooltip_text(desc_);
     }
   }
-
+  locker.unlock();
   // Call parent update
   ALabel::update();
 }
